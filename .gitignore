@@ -1,0 +1,16 @@
+/0_GMW
+/0_landsat_downloads
+/1_imagery
+/1_imagery_merge
+/2_Mask
+/3_imagery_subsets
+/3_mask_subsets
+/4_model
+/4_runs
+/5_test_predictions
+/6_merged_predictions
+/imagery_subsets
+/runs
+/scene_list_display_id.txt
+/scene_list_display_id_test4.txt
+/scene_list_entity_id.txt

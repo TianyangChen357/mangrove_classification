@@ -1,0 +1,22 @@
+name: mangrove
+channels:
+  - defaults
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.9
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - rasterio
+  - geopandas
+  - pip
+  - tensorboard
+  - pip:
+    - segmentation-models-pytorch
+    - albumentations
+    - numpy==1.26
+    - pandas
+    - matplotlib
+    - opencv-python
