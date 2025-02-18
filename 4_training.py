@@ -40,13 +40,14 @@ def load_tif_dataset_and_masks(tif_dir, mask_dir, scene_names):
 
                 with rasterio.open(mask_path) as src:
                     mask = src.read(1)  # Shape: (256, 256), single channel
-                mask[mask == 255] = -1
-                # Check if mask has any mangrove pixels (value 1)
-                if np.any(mask ==1):  
+                # mask[mask == 255] = -1
+                    if np.any(mask == 255) or np.all(mask == 0):  
+                        removed_count += 1  # Count removed subsets
+                        continue  # Skip this image
+
+                    # Otherwise, add the image and mask to the dataset
                     image_list.append(img)
                     mask_list.append(mask[np.newaxis, :, :])  # Add channel dimension
-                else:
-                    removed_count += 1  # Count removed subsets
 
     if image_list and mask_list:
         images = np.stack(image_list, axis=0).astype(np.float32)  # (num_samples, 6, 256, 256)
