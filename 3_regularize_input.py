@@ -81,12 +81,14 @@ if __name__ == "__main__":
 # imagery subset
     input_directory = "./1_imagery_merge"  # Directory containing Landsat GeoTIFF files
     output_directory = "./3_imagery_subsets"  # Directory to save the subsets
+    os.makedirs(output_directory, exist_ok=True)
     for scene_name in scene_names:
         input_file=os.path.join(input_directory,f'{scene_name}_merged.tif')
         create_subsets_from_merged(scene_name, input_file, output_directory)
 # mask subset 
     input_directory = "./2_Mask"  # Directory containing Landsat GeoTIFF files
     output_directory = "./3_mask_subsets"  # Directory to save the subsets
+    os.makedirs(output_directory, exist_ok=True)
     for scene_name in scene_names:
         input_file=os.path.join(input_directory,f'{scene_name}_mask.TIF')
         create_subsets_from_merged(scene_name, input_file, output_directory)

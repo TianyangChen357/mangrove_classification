@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import precision_score, recall_score, f1_score, jaccard_score, accuracy_score, confusion_matrix
 import segmentation_models_pytorch as smp
 from collections import defaultdict
-
+import random
 
 def load_test_data(tif_dir, mask_dir, scene_names):
     """
@@ -76,10 +76,24 @@ def run_inference(model, dataloader, device, output_dir, filenames):
                 
                 with rasterio.open(output_path, 'w', **meta) as dst:
                     dst.write(confusion_map, 1)
-                
-                # Update confusion matrix for the scene
-                conf_matrix = confusion_matrix(true_mask.flatten(), pred_mask.flatten(), labels=[0, 1])
+                # Convert binary predictions to TP (3), FP (2), FN (1), TN (0)
+                pred_mask = preds[j, 0]
+                true_mask = masks[j, 0].cpu().numpy()
+
+                # Exclude background pixels (255) from evaluation
+                valid_pixels = true_mask != 255  # Create a boolean mask where pixels are valid (not 255)
+                true_mask_valid = true_mask[valid_pixels]
+                pred_mask_valid = pred_mask[valid_pixels]
+
+                # Check if the valid mask contains at least one instance of each class
+                if len(true_mask_valid) == 0:
+                    print(f"Skipping {filename} - No valid pixels for evaluation.")
+                    continue  # Skip if no valid pixels remain
+
+                # Update confusion matrix only for valid pixels
+                conf_matrix = confusion_matrix(true_mask_valid.flatten(), pred_mask_valid.flatten(), labels=[0, 1])
                 scene_conf_matrices[scene] += conf_matrix
+
     
     # Compute and print metrics per scene
     for scene, conf_matrix in scene_conf_matrices.items():
@@ -94,15 +108,32 @@ def run_inference(model, dataloader, device, output_dir, filenames):
 
 
 def main():
-    model_dir = './model/initial_train.pth'
+    model_dir = './4_model/unet_resnet34.pth'
     test_tif_dir = "./3_imagery_subsets"  # Update with actual path
     test_mask_dir = "./3_mask_subsets"  # Update with actual path
-    test_scenes = [
-        "LT05_L2SP_107070_20070629_20200830_02_T1",
-    ]  # Update with actual test scenes
 
-    output_dir = "./test_predictions"
+    scene_list_file = "scene_list_display_id_test4.txt"
+    with open(scene_list_file, "r") as f:
+        scene_names = [line.strip() for line in f.readlines() if line.strip()]
     
+    split_ratio = 0.8  # Adjust as needed
+    SEED = 42
+    random.seed(SEED)
+    # Shuffle the scenes to ensure randomness (but with a fixed seed for reproducibility)
+    random.shuffle(scene_names)
+
+    # Split the data
+    split_index = int(len(scene_names) * split_ratio)
+    test_scenes = scene_names[split_index:]
+    # test_scenes = [
+    #     'LT05_L2SP_107070_20080428_20200829_02_T1', 
+    #     'LT05_L2SP_121058_20091010_20200825_02_T2', 
+    #     'LT05_L2SP_035043_20080926_20200829_02_T1', 
+    #     'LT05_L2SP_160042_20080517_20200829_02_T1',
+    # ]  # Update with actual test scenes
+
+    output_dir = "./5_test_predictions"
+    os.makedirs(output_dir, exist_ok=True)
     images, masks, filenames = load_test_data(test_tif_dir, test_mask_dir, test_scenes)
     test_dataset = TestDataset(images, masks)
     test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)

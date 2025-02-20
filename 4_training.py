@@ -11,7 +11,7 @@ import time
 import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import random
-
+import datetime
 def load_tif_dataset_and_masks(tif_dir, mask_dir, scene_names):
     """
     Loads TIFF images and corresponding masks into NumPy arrays, 
@@ -167,7 +167,8 @@ def main():
         scene_names = [line.strip() for line in f.readlines() if line.strip()]
 
     split_ratio = 0.8  # Adjust as needed
-
+    SEED = 42
+    random.seed(SEED)
     # Shuffle the scenes to ensure randomness (but with a fixed seed for reproducibility)
     random.shuffle(scene_names)
 
@@ -211,10 +212,11 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.BCEWithLogitsLoss()
 
-    num_epochs = 10
-
+    num_epochs = 100
+    log_dir="4_runs"
+    os.makedirs(log_dir, exist_ok=True)
     # Initialize TensorBoard writer
-    writer = SummaryWriter(log_dir="runs/mangrove_segmentation")
+    writer = SummaryWriter(log_dir=log_dir)
 
     for epoch in range(num_epochs):
         train_loss, train_iou = train_one_epoch(model, train_loader, optimizer, criterion, device)
@@ -229,8 +231,9 @@ def main():
         writer.add_scalar("IoU/Train", train_iou, epoch + 1)
         writer.add_scalar("Loss/Validation", val_loss, epoch + 1)
         writer.add_scalar("IoU/Validation", val_iou, epoch + 1)
-
-    torch.save(model.state_dict(), "./model/unet_resnet34.pth")
+    model_dir="4_model"
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    torch.save(model.state_dict(), os.path.join(model_dir,f"unet_res34_{timestamp}"))
     writer.close()  # Close TensorBoard writer
 
     loadtime=time.time()-start

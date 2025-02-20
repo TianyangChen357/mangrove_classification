@@ -80,7 +80,7 @@ if __name__ == "__main__":
     imagery_merge_dir = "./1_imagery_merge/"  # Folder containing merged Landsat images
     mask_dir = "./2_Mask/"  # Output folder for masks
     mangrove_dir = "./0_GMW/"  # Folder containing mangrove shapefiles by year
-
+    os.makedirs(mask_dir, exist_ok=True)
     # Load scene names from the file
     with open(scene_list_file, "r") as f:
         scene_names = [line.strip() for line in f.readlines() if line.strip()]

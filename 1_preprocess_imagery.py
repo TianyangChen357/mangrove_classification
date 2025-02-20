@@ -122,5 +122,6 @@ if __name__ == "__main__":
     tar_directory = "./0_landsat_downloads"  # TAR file location
     extract_directory = "./1_imagery"  # Directory to extract files
     output_directory = "./1_imagery_merge"  # Output directory for merged TIFFs
-
+    os.makedirs(extract_directory, exist_ok=True)
+    os.makedirs(output_directory, exist_ok=True)
     process_all_scenes_to_geotiff(scene_names, tar_directory, extract_directory, output_directory)

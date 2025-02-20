@@ -1,5 +1,5 @@
 from landsatxplore.earthexplorer import EarthExplorer
-
+import os
 # Your USGS Earth Explorer credentials
 username = "tchen19"
 password = "Cty15830061892"
@@ -9,7 +9,7 @@ input_file = "scene_list_display_id_test4.txt"
 
 # Output directory for downloads
 output_dir = "0_landsat_downloads"
-
+os.makedirs(output_dir, exist_ok=True)
 # Read Display IDs from file
 with open(input_file, "r") as f:
     display_ids = [line.strip() for line in f.readlines() if line.strip()]
