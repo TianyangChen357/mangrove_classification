@@ -1,58 +1,125 @@
-from landsatxplore.api import API
+import requests
 import geopandas as gpd
-from tqdm import tqdm
+import sys
+import random
+import json
 
-# Load your USGS Earth Explorer credentials
-username = "tchen19"
-password = "Cty15830061892"
+"""
+Script Name: 0_1_query_TMc2l2.py
+Description:
+This script queries Landsat scenes from USGS M2M API and selects only **Tier 1 (T1)** scenes.
+It automatically **excludes Tier 2 (T2) scenes** from the selection.
 
-# Initialize API
-api = API(username, password)
+Example
 
-# Load Global Mangrove Watch (GMW) shapefile
+python 0_1_query_TMc2l2.py 500 landsat_tm_c2_l2
+Output:
+- **Valid `displayId` and `entityId` scenes** are saved as a list in `scene_list_display_id.txt` and `scene_list_entity_id.txt`
+"""
+
+# USGS M2M API Endpoint
+SERVICE_URL = "https://m2m.cr.usgs.gov/api/api/json/stable/"
+
+# ?? Hardcoded USGS Credentials
+USERNAME = "tchen19"
+TOKEN = "L7n6RhXN2gvJUsK4_z@V9bneeSZ7FuZEppG06gAm7e7sDfRpDJXWAf@y@uGzxpjG"
+
+# Function to send API requests
+def send_request(url, data, api_key=None):
+    headers = {"X-Auth-Token": api_key} if api_key else {}
+    response = requests.post(url, json=data, headers=headers)
+
+    if response.status_code == 200:
+        response_data = response.json()
+        if response_data["errorCode"] is None:
+            return response_data["data"]
+        else:
+            print(f"? API Error: {response_data['errorMessage']}")
+            return None
+    else:
+        print(f"? HTTP Error {response.status_code} for {url}")
+        return None
+
+# Step 1: Authenticate and get API Key
+# print("\n?? Logging in to USGS M2M API...")
+api_key = send_request(SERVICE_URL + "login-token", {"username": USERNAME, "token": TOKEN})
+if not api_key:
+    print("? Authentication failed. Exiting...")
+    exit()
+
+# print(f"? API Key: {api_key}\n")
+
+# Step 2: Load Global Mangrove Watch (GMW) shapefile
 gmw = gpd.read_file("./0_GMW/GMW_v3_2010/gmw_v3_2010_vec.shp")
-gmw = gmw.sample(n=50)
-# print(gmw)
-# Query parameters
-start_date = "2007-01-01"
-end_date = "2020-12-31"
-dataset = "LANDSAT_TM_C2_L2"  # Landsat Thematic Mapper C2 Level-2
 
-# Store unique scene IDs in a set
-scene_ids = set()
-display_ids= set()
-# Loop through each polygon in GMW with tqdm progress bar
-tqdm_bar = tqdm(gmw.iterrows(), total=len(gmw), desc="Processing polygons")
+# User-specified number of required scenes
+required_scenes = int(sys.argv[1])
+dataset = sys.argv[2]
 
-for index, row in tqdm_bar:
-    bbox = row.geometry.bounds  # Get bounding box (minx, miny, maxx, maxy)
-    
-    # Query Landsat images for this region with 0% cloud cover
-    scenes = api.search(
-        dataset=dataset,
-        bbox=[bbox[0], bbox[1], bbox[2], bbox[3]],  # (lat_min, lon_min, lat_max, lon_max)
-        start_date=start_date,
-        end_date=end_date,
-        max_cloud_cover=0  # Set cloud cover to 0% but it seems this one does not work properly
-    )
-    
-    # Update tqdm progress bar with the number of scenes found
-    tqdm_bar.set_description(f"Scenes found: {len(scene_ids)}")
+# Store selected scenes
+location_scenes = {}
+scene_list = []
 
-    # Add unique scene IDs to the set
-    scene_ids.update(scene["entity_id"] for scene in scenes if scene["land_cloud_cover"] == 0)
-    display_ids.update(scene["display_id"] for scene in scenes if scene["land_cloud_cover"] == 0)
+# Step 3: Keep sampling locations until we reach the required number of scenes
+while len(location_scenes) < required_scenes:
+    # Randomly sample a location from the dataset
+    sampled_location = gmw.sample(n=1).iloc[0]
+    index = sampled_location.name
+    bbox = sampled_location.geometry.bounds  # Get bounding box (minx, miny, maxx, maxy)
+    # print(f"?? Processing Bounding Box: {bbox}")
 
+    # ? Corrected Payload
+    payload = {
+        "datasetName": dataset,
+        "maxResults": 5,  # Increase to find more valid results
+        "startingNumber": 1,
+        "sceneFilter": {
+            "spatialFilter": {
+                "filterType": "mbr",
+                "lowerLeft": {"longitude": bbox[0], "latitude": bbox[1]},
+                "upperRight": {"longitude": bbox[2], "latitude": bbox[3]}
+            },
+            "cloudCoverFilter": {
+                "min": 0,
+                "max": 0,  # Allow slight cloud cover if needed
+                "includeUnknown": True
+            },
+            "acquisitionFilter": {
+                "start": "2007-01-01",
+                "end": "2010-12-31"
+            }
+        },
+        "metadataType": "summary",
+        "sortDirection": "ASC"
+    }
 
-# Save to a text file
-with open("scene_list_entity_id.txt", "w") as f:
-    for scene in scene_ids:
-        f.write(scene + "\n")
+    # Make the request
+    scenes = send_request(SERVICE_URL + "scene-search", payload, api_key)
+
+    # Process valid cloud-free Tier 1 (T1) scenes
+    if scenes and "results" in scenes:
+        for scene in scenes["results"]:
+            if scene["displayId"].endswith("_T1"):  # ? Select only Tier 1 scenes
+                location_scenes[index] = {
+                    "displayId": scene["displayId"],
+                    "entityId": scene["entityId"]
+                }
+                scene_list.append((scene["displayId"], scene["entityId"]))
+                # print(f"? Selected: {scene['displayId']} (T1) with Entity ID: {scene['entityId']}")
+                break  # ?? Stop after selecting first valid scene
+
+    # print(f"?? Progress: {len(location_scenes)} out of {required_scenes} scenes selected.")
+
+# Step 4: Save `displayId` and `entityId` to text files
 with open("scene_list_display_id.txt", "w") as f:
-    for scene in display_ids:
-        f.write(scene + "\n")
+    for display_id, _ in scene_list:
+        f.write(display_id + "\n")
 
-# Logout from API
-api.logout()
+with open("scene_list_entity_id.txt", "w") as f:
+    for _, entity_id in scene_list:
+        f.write(entity_id + "\n")
 
-print(f"Found {len(scene_ids)} unique cloud-free Landsat TM C2L2 scenes.")
+# Step 5: Logout from API
+send_request(SERVICE_URL + "logout", {}, api_key)
+# print("? Successfully logged out.")
+print(f"? Successfully selected {len(location_scenes)} unique cloud-free Landsat TM C2L2 Tier 1 (T1) scenes.")

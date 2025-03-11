@@ -2,7 +2,7 @@ import os
 import rasterio
 from rasterio.merge import merge
 import random
-
+import sys
 def merge_predictions_by_scene(input_dir, output_dir, test_scenes):
     """
     Merges predicted masks for each scene into a single raster.
@@ -15,7 +15,7 @@ def merge_predictions_by_scene(input_dir, output_dir, test_scenes):
     os.makedirs(output_dir, exist_ok=True)
     
     for scene in test_scenes:
-        print(f'Merging scene {scene}')
+        # print(f'Merging scene {scene}')
         
         file_list = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.startswith(scene) and f.endswith(".tif")]
         
@@ -47,7 +47,7 @@ def merge_predictions_by_scene(input_dir, output_dir, test_scenes):
             with rasterio.open(output_path, "w", **out_meta) as dst:
                 dst.write(mosaic[0], 1)  # Ensure the correct number of dimensions is used
 
-            print(f"Merged scene {scene} saved at {output_path}")
+            # print(f"Merged scene {scene} saved at {output_path}")
 
         finally:
             # Ensure all files are closed
@@ -58,24 +58,16 @@ if __name__ == "__main__":
     input_directory = "./5_test_predictions"  # Directory containing predicted mask subsets
     output_directory = "./6_merged_predictions"  # Directory to store merged outputs
     
-    scene_list_file = "scene_list_display_id_test4.txt"
+    scene_list_file = sys.argv[1]
     with open(scene_list_file, "r") as f:
         scene_names = [line.strip() for line in f.readlines() if line.strip()]
     
-    split_ratio = 0.8  # Adjust as needed
+    split_ratio = 0.8
     SEED = 42
     random.seed(SEED)
-    # Shuffle the scenes to ensure randomness (but with a fixed seed for reproducibility)
     random.shuffle(scene_names)
 
-    # Split the data
+    # Use the remaining 20% of scenes for testing
     split_index = int(len(scene_names) * split_ratio)
     test_scenes = scene_names[split_index:]
-    # test_scenes = [
-    #     'LT05_L2SP_107070_20080428_20200829_02_T1', 
-    #     'LT05_L2SP_121058_20091010_20200825_02_T2', 
-    #     'LT05_L2SP_035043_20080926_20200829_02_T1', 
-    #     'LT05_L2SP_160042_20080517_20200829_02_T1',
-    # ]  # Update with actual test scenes
-    
     merge_predictions_by_scene(input_directory, output_directory, test_scenes)

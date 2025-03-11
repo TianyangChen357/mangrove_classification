@@ -3,147 +3,211 @@ import torch
 import numpy as np
 import rasterio
 from torch.utils.data import DataLoader, Dataset
-from sklearn.metrics import precision_score, recall_score, f1_score, jaccard_score, accuracy_score, confusion_matrix
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 import segmentation_models_pytorch as smp
 from collections import defaultdict
+import sys
 import random
+import csv
+from rasterio.windows import Window
+from rasterio.merge import merge
+from rasterio.io import MemoryFile
 
-def load_test_data(tif_dir, mask_dir, scene_names):
-    """
-    Loads test images and corresponding masks.
-    """
-    image_list, mask_list, filenames = [], [], []
-    
+"""
+Script Name: 5_testing.py
+Description:
+This script evaluates a trained U-Net model on Landsat test imagery. It handles:
+- Image tiling (256x256 subsets)
+- Excluding NoData values
+- Merging predictions back into full scenes
+- Computing evaluation metrics per scene
+
+Outputs:
+- Merged scene predictions (GeoTIFFs) stored in `./6_merged_predictions/`
+- Evaluation metrics saved in `scene_metrics.csv`
+"""
+
+def create_raster_memory(array, transform, meta):
+    """Creates an in-memory raster dataset from a NumPy array."""
+    memfile = MemoryFile()
+    with memfile.open(
+        driver="GTiff",
+        height=array.shape[0],
+        width=array.shape[1],
+        count=1,
+        dtype=array.dtype,
+        transform=transform,
+        crs=meta["crs"],
+    ) as dataset:
+        dataset.write(array, 1)
+    return memfile.open()
+
+def load_test_data(tif_dir, mask_dir, scene_names, subset_size=256):
+    """Loads and tiles Landsat images and masks, ensuring valid inference data."""
+    image_dict, mask_dict, meta_dict = {}, {}, {}
+
     for scene in scene_names:
-        for filename in os.listdir(tif_dir):
-            if filename.startswith(scene) and filename.endswith(".tif"):
-                image_path = os.path.join(tif_dir, filename)
-                mask_path = os.path.join(mask_dir, filename)
-                
-                with rasterio.open(image_path) as src:
-                    img = src.read()  # Shape: (6, 256, 256)
-                with rasterio.open(mask_path) as src:
-                    mask = src.read(1)  # Shape: (256, 256)
-                    meta = src.meta.copy()
-                
-                image_list.append(img)
-                mask_list.append(mask[np.newaxis, :, :])  # Add channel dimension
-                filenames.append((scene, filename, meta))
-    
-    images = np.stack(image_list, axis=0).astype(np.float32)
-    masks = np.stack(mask_list, axis=0).astype(np.float32)
-    return images, masks, filenames
+        image_path = os.path.join(tif_dir, f"{scene}_merged.tif")
+        mask_path = os.path.join(mask_dir, f"{scene}_mask.TIF")
 
+        if not os.path.exists(image_path) or not os.path.exists(mask_path):
+            print(f"⚠️ Skipping {scene}: Missing imagery or mask.")
+            continue
+
+        with rasterio.open(image_path) as src_imagery, rasterio.open(mask_path) as src_mask:
+            width, height = src_imagery.width, src_imagery.height
+            count, nodata = src_imagery.count, src_imagery.nodata
+            meta = src_imagery.meta.copy()
+
+            num_rows = (height + subset_size - 1) // subset_size
+            num_cols = (width + subset_size - 1) // subset_size
+
+            image_dict[scene] = []
+            mask_dict[scene] = []
+            meta_dict[scene] = meta
+
+            for row in range(num_rows):
+                for col in range(num_cols):
+                    row_start, col_start = row * subset_size, col * subset_size
+                    row_end, col_end = min((row + 1) * subset_size, height), min((col + 1) * subset_size, width)
+
+                    window = Window(col_start, row_start, col_end - col_start, row_end - row_start)
+
+                    imagery_data = src_imagery.read(window=window, boundless=True, fill_value=0)
+                    mask_data = src_mask.read(1, window=window, boundless=True, fill_value=0)
+
+                    # Skip subsets with NoData values
+                    if nodata is not None and np.any(imagery_data == nodata):
+                        continue
+
+                    # Apply padding
+                    padded_imagery = np.zeros((count, subset_size, subset_size), dtype=imagery_data.dtype)
+                    padded_imagery[:, :imagery_data.shape[1], :imagery_data.shape[2]] = imagery_data
+
+                    padded_mask = np.zeros((subset_size, subset_size), dtype=np.uint8)
+                    padded_mask[:mask_data.shape[0], :mask_data.shape[1]] = mask_data
+
+                    image_dict[scene].append((padded_imagery, padded_mask, row, col))
+
+    return image_dict, mask_dict, meta_dict
 
 class TestDataset(Dataset):
-    def __init__(self, images, masks):
-        self.images = images
-        self.masks = masks
+    """PyTorch dataset for test images and masks."""
+    def __init__(self, image_list):
+        self.image_list = image_list
 
     def __len__(self):
-        return len(self.images)
+        return len(self.image_list)
 
     def __getitem__(self, idx):
-        image = torch.tensor(self.images[idx], dtype=torch.float32)
-        mask = torch.tensor(self.masks[idx], dtype=torch.float32)
-        return image, mask
+        image, mask, row, col = self.image_list[idx]
+        return (
+            torch.tensor(image, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.float32),
+            row,
+            col
+        )
 
-
-def run_inference(model, dataloader, device, output_dir, filenames):
+def run_inference(model, dataloader, device, meta, scene):
+    """Runs inference, merges results, and saves full raster."""
     model.eval()
-    os.makedirs(output_dir, exist_ok=True)
-    scene_conf_matrices = defaultdict(lambda: np.zeros((2, 2), dtype=int))
-    
+    scene_predictions = []
+    scene_conf_matrix = np.zeros((2, 2), dtype=int)
+
     with torch.no_grad():
-        for i, (images, masks) in enumerate(dataloader):
+        for images, masks, rows, cols in dataloader:
             images = images.to(device)
             outputs = model(images)
+
             preds = (outputs.cpu().numpy() > 0.5).astype(np.uint8)
-            
+
             for j in range(preds.shape[0]):
-                scene, filename, meta = filenames[i * dataloader.batch_size + j]
-                output_path = os.path.join(output_dir, filename)
-                meta.update({"count": 1, "dtype": "uint8"})
-                
-                # Convert binary predictions to TP (3), FP (2), FN (1), TN (0)
+                row, col = rows[j].item(), cols[j].item()
                 pred_mask = preds[j, 0]
-                true_mask = masks[j, 0].cpu().numpy()
-                confusion_map = np.zeros_like(pred_mask, dtype=np.uint8)
-                confusion_map[(pred_mask == 1) & (true_mask == 1)] = 3  # TP
-                confusion_map[(pred_mask == 1) & (true_mask == 0)] = 2  # FP
-                confusion_map[(pred_mask == 0) & (true_mask == 1)] = 1  # FN
-                confusion_map[(pred_mask == 0) & (true_mask == 0)] = 0  # TN
-                
-                with rasterio.open(output_path, 'w', **meta) as dst:
-                    dst.write(confusion_map, 1)
-                # Convert binary predictions to TP (3), FP (2), FN (1), TN (0)
-                pred_mask = preds[j, 0]
-                true_mask = masks[j, 0].cpu().numpy()
+                true_mask = masks[j].cpu().numpy().squeeze()
 
-                # Exclude background pixels (255) from evaluation
-                valid_pixels = true_mask != 255  # Create a boolean mask where pixels are valid (not 255)
-                true_mask_valid = true_mask[valid_pixels]
-                pred_mask_valid = pred_mask[valid_pixels]
+                valid_pixels = (true_mask != 255)
 
-                # Check if the valid mask contains at least one instance of each class
-                if len(true_mask_valid) == 0:
-                    print(f"Skipping {filename} - No valid pixels for evaluation.")
-                    continue  # Skip if no valid pixels remain
+                true_mask_valid = true_mask[valid_pixels].flatten()
+                pred_mask_valid = pred_mask[valid_pixels].flatten()
 
-                # Update confusion matrix only for valid pixels
-                conf_matrix = confusion_matrix(true_mask_valid.flatten(), pred_mask_valid.flatten(), labels=[0, 1])
-                scene_conf_matrices[scene] += conf_matrix
+                if len(true_mask_valid) > 0 and len(pred_mask_valid) > 0:
+                    conf_matrix = confusion_matrix(true_mask_valid, pred_mask_valid, labels=[0, 1])
+                    scene_conf_matrix += conf_matrix
 
-    
-    # Compute and print metrics per scene
-    for scene, conf_matrix in scene_conf_matrices.items():
-        tn, fp, fn, tp = conf_matrix.ravel()
-        iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
-        accuracy = (tp + tn) / (tp + tn + fp + fn)
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-        
-        print(f"Scene {scene}: IoU={iou:.4f}, Accuracy={accuracy:.4f}, Precision={precision:.4f}, Recall={recall:.4f}, F1-score={f1:.4f}")
+                window = Window(col * 256, row * 256, 256, 256)
+                transform = rasterio.windows.transform(window, meta["transform"])
+                scene_predictions.append((pred_mask, transform))
 
+    # Convert NumPy predictions to raster datasets
+    raster_datasets = [create_raster_memory(pred, transform, meta) for pred, transform in scene_predictions]
+
+    # Merge tiled predictions into a full raster
+    merged_pred, merged_transform = merge(raster_datasets)
+
+    # Save merged output
+    output_dir = "./6_merged_predictions"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{scene}_predicted.tif")
+
+    meta.update({
+        "driver": "GTiff",
+        "height": merged_pred.shape[1],
+        "width": merged_pred.shape[2],
+        "transform": merged_transform,
+        "count": 1,
+        "dtype": "uint8"
+    })
+
+    with rasterio.open(output_path, "w", **meta) as dst:
+        dst.write(merged_pred[0], 1)
+
+    print(f"✅ Merged prediction saved: {output_path}")
+
+    # Compute scene metrics
+    tn, fp, fn, tp = scene_conf_matrix.ravel()
+    iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0.0
+    accuracy = (tp + tn) / (tp + tn + fp + fn)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return [scene, round(iou, 4), round(accuracy, 4), round(precision, 4), round(recall, 4), round(f1, 4), tn, fp, fn, tp]
 
 def main():
-    model_dir = './4_model/unet_resnet34.pth'
-    test_tif_dir = "./3_imagery_subsets"  # Update with actual path
-    test_mask_dir = "./3_mask_subsets"  # Update with actual path
-
-    scene_list_file = "scene_list_display_id_test4.txt"
+    model_dir = os.path.join('./4_model', "unet_res34_lr0.0001_epochs500_bs32.pth")
+    scene_list_file="scene_list_display_id.txt"
+    # model_dir=sys.argv[2]
+    # scene_list_file=sys.argv[1]
+    test_tif_dir = "./1_imagery_merge"
+    test_mask_dir = "./2_Mask"
+    
     with open(scene_list_file, "r") as f:
         scene_names = [line.strip() for line in f.readlines() if line.strip()]
-    
-    split_ratio = 0.8  # Adjust as needed
-    SEED = 42
-    random.seed(SEED)
-    # Shuffle the scenes to ensure randomness (but with a fixed seed for reproducibility)
-    random.shuffle(scene_names)
 
-    # Split the data
-    split_index = int(len(scene_names) * split_ratio)
-    test_scenes = scene_names[split_index:]
-    # test_scenes = [
-    #     'LT05_L2SP_107070_20080428_20200829_02_T1', 
-    #     'LT05_L2SP_121058_20091010_20200825_02_T2', 
-    #     'LT05_L2SP_035043_20080926_20200829_02_T1', 
-    #     'LT05_L2SP_160042_20080517_20200829_02_T1',
-    # ]  # Update with actual test scenes
-
-    output_dir = "./5_test_predictions"
-    os.makedirs(output_dir, exist_ok=True)
-    images, masks, filenames = load_test_data(test_tif_dir, test_mask_dir, test_scenes)
-    test_dataset = TestDataset(images, masks)
-    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
+    image_dict, mask_dict, meta_dict = load_test_data(test_tif_dir, test_mask_dir, scene_names)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=6, classes=1)
     model.load_state_dict(torch.load(model_dir, map_location=device))
     model.to(device)
-    
-    run_inference(model, test_loader, device, output_dir, filenames)
+
+    csv_filename = "scene_metrics.csv"
+    with open(csv_filename, mode="w", newline="") as file:
+        writer = csv.writer(file)
+
+        # ✅ Write correct header
+        writer.writerow(["Scene", "IoU", "Accuracy", "Precision", "Recall", "F1-score", "TN", "FP", "FN", "TP"])
+
+        for scene, image_list in image_dict.items():
+            test_dataset = TestDataset(image_list)
+            test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
+
+            # ✅ Get metrics from run_inference()
+            metrics = run_inference(model, test_loader, device, meta_dict[scene], scene)
+
+            # ✅ Write the metrics for each scene
+            writer.writerow(metrics)
 
 
 if __name__ == "__main__":
